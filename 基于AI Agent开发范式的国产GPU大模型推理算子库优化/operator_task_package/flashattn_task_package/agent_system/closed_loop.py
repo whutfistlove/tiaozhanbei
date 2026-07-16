@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from agent_system.domain_memory import DomainMemory
+from agent_system.global_best import (
+    BaselineSource,
+    publish_global_best,
+    resolve_baseline_source,
+)
 from agent_system.kernel_version_store import KernelVersionStore
 from agent_system.optimization_log import OptimizationEntry, OptimizationLog
 from agent_system.paths import (
@@ -54,6 +59,9 @@ class ClosedLoopResult:
     nochange: int
     logs_dir: str
     summary_path: str
+    baseline_source: str = ""
+    baseline_path: str = ""
+    global_best_path: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -95,7 +103,7 @@ def _safe_name(value: str, default: str = "candidate") -> str:
 def load_proposals(path: str | Path | None) -> list[ChangeProposal]:
     if not path:
         return []
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     if isinstance(data, dict) and "proposals" in data:
         data = data["proposals"]
     elif isinstance(data, dict) and "proposal" in data:
@@ -161,9 +169,12 @@ def _select_proposal(
     current_code: str,
     explicit: Sequence[ChangeProposal],
     phase: OptimizationPhase,
+    allow_auto_proposal: bool,
 ) -> ChangeProposal | None:
     if round_idx < len(explicit):
         return explicit[round_idx]
+    if not allow_auto_proposal:
+        return None
     return default_proposal(round_idx, current_code, phase=phase)
 
 
@@ -216,6 +227,8 @@ def _run_dry_loop(
     run_dir: Path,
     max_rounds: int,
     phase: OptimizationPhase,
+    allow_auto_proposal: bool,
+    proposal_required: bool,
 ) -> list[dict]:
     v0 = store.add_source(operator_id, initial_code, "initial baseline", verdict="KEEP", metrics={})
     store.promote(v0.version_id)
@@ -243,19 +256,25 @@ def _run_dry_loop(
             "bottleneck": bottleneck,
         })
 
-        proposal = _select_proposal(idx, current_code, proposals, phase)
+        proposal = _select_proposal(idx, current_code, proposals, phase, allow_auto_proposal)
         if proposal is None:
-            reason = "no proposal generated"
+            reason = (
+                "Coder proposal is required, but no proposal artifact was provided"
+                if proposal_required else
+                "no proposal generated"
+            )
+            verdict = "ERROR" if proposal_required else "NOCHANGE"
+            category = "error_agent_output" if proposal_required else "nochange"
             decision = {
                 "iteration": iteration,
-                "verdict": "NOCHANGE",
-                "category": "nochange",
+                "verdict": verdict,
+                "category": category,
                 "reason": reason,
                 "baseline_version": current_version,
             }
-            _record_log(log, iteration, cfg, current_version, "NOCHANGE", "nochange", reason)
+            _record_log(log, iteration, cfg, current_version, verdict, category, reason, correctness=False)
             _write_json(round_dir / "decision.json", decision)
-            _append_event(run_dir, "round.nochange", **decision)
+            _append_event(run_dir, "round.agent_output_error" if proposal_required else "round.nochange", **decision)
             decisions.append(decision)
             continue
 
@@ -337,6 +356,7 @@ def _run_real_loop(
     noise_margin: float,
     warmup: int,
     repeats: int,
+    allow_auto_proposal: bool,
 ) -> list[dict]:
     from agent_system.real_orchestrator import run_ab_loop
 
@@ -347,7 +367,7 @@ def _run_real_loop(
     def gen(_cfg, _bottleneck, _memory, current_code):
         idx = state["idx"]
         state["idx"] += 1
-        return _select_proposal(idx, current_code, proposals, phase)
+        return _select_proposal(idx, current_code, proposals, phase, allow_auto_proposal)
 
     results = run_ab_loop(
         cfg=cfg,
@@ -380,6 +400,34 @@ def _run_real_loop(
     return decisions
 
 
+def _publish_latest_keep(
+    *,
+    operator_id: str,
+    decisions: Sequence[dict],
+    store: KernelVersionStore,
+    run_dir: Path,
+) -> dict | None:
+    kept = [
+        d for d in decisions
+        if d.get("verdict") == "KEEP" and d.get("promoted_version")
+    ]
+    if not kept:
+        return None
+    decision = kept[-1]
+    version = store.get(decision["promoted_version"])
+    source_path = store.base_dir / version.file
+    source_code = source_path.read_text(encoding="utf-8")
+    return publish_global_best(
+        operator_id=operator_id,
+        source_code=source_code,
+        run_id=run_dir.name,
+        run_dir=run_dir,
+        version_id=version.version_id,
+        metrics={**version.metrics, "decision": decision},
+        description=version.description,
+    )
+
+
 def run_closed_loop(
     operator_id: str = DEFAULT_OPERATOR_ID,
     kernel_path: str | Path = DEFAULT_KERNEL,
@@ -396,12 +444,15 @@ def run_closed_loop(
     noise_margin: float = 0.03,
     warmup: int = 5,
     repeats: int = 30,
+    baseline_source: BaselineSource = "auto",
+    proposal_required: bool = False,
+    allow_auto_proposal: bool = True,
 ) -> ClosedLoopResult:
-    kernel = Path(kernel_path)
-    if not kernel.is_absolute():
-        kernel = PROJECT_ROOT / kernel
-    if not kernel.exists():
-        raise FileNotFoundError(f"kernel not found: {kernel}")
+    initial_code, resolved_baseline_path, baseline_meta = resolve_baseline_source(
+        operator_id=operator_id,
+        kernel_path=kernel_path,
+        baseline_source=baseline_source,
+    )
 
     run_dir = new_run_dir(tag)
     logs_dir = run_dir / "logs"
@@ -412,9 +463,10 @@ def run_closed_loop(
         num_heads=num_heads,
         num_heads_k=num_heads_k,
     )
-    initial_code = kernel.read_text(encoding="utf-8")
-    proposals = load_proposals(proposal_path)
+    proposals: list[ChangeProposal] = []
     mode = "dry-run" if dry_run else "real"
+    global_best_entry = baseline_meta.get("global_best") or {}
+    global_best_path = str(global_best_entry.get("source_path", ""))
 
     manifest = {
         "run_id": run_dir.name,
@@ -422,7 +474,13 @@ def run_closed_loop(
         "status": "running",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "operator_id": operator_id,
-        "kernel_path": str(kernel),
+        "kernel_path": str(kernel_path),
+        "baseline_source": baseline_source,
+        "baseline_kind": baseline_meta.get("kind"),
+        "baseline_resolved_path": str(resolved_baseline_path),
+        "global_best_path": global_best_path,
+        "proposal_required": proposal_required,
+        "allow_auto_proposal": allow_auto_proposal,
         "rounds_requested": rounds,
         "phase": phase,
         "config": asdict(cfg),
@@ -436,30 +494,50 @@ def run_closed_loop(
     }
     _write_json(run_dir / "run_manifest.json", manifest)
     write_latest_run(run_dir)
-    _append_event(run_dir, "run.start", mode=mode, operator_id=operator_id, kernel_path=str(kernel))
+    _append_event(
+        run_dir,
+        "run.start",
+        mode=mode,
+        operator_id=operator_id,
+        kernel_path=str(kernel_path),
+        baseline_source=baseline_source,
+        baseline_resolved_path=str(resolved_baseline_path),
+    )
 
     memory = DomainMemory(base_dir=run_dir / "memory")
     log = OptimizationLog(log_dir=logs_dir)
     store = KernelVersionStore(run_dir / "versions")
 
     try:
+        proposals = load_proposals(proposal_path)
         if dry_run:
             decisions = _run_dry_loop(
-                cfg, initial_code, operator_id, proposals, log, store, memory, run_dir, rounds, phase
+                cfg, initial_code, operator_id, proposals, log, store, memory,
+                run_dir, rounds, phase, allow_auto_proposal, proposal_required
             )
         else:
+            if proposal_required and not allow_auto_proposal and len(proposals) < rounds:
+                raise RuntimeError(
+                    "Coder proposal artifact is required for every requested round; "
+                    f"got {len(proposals)} proposal(s) for {rounds} round(s)"
+                )
             decisions = _run_real_loop(
                 cfg, initial_code, operator_id, proposals, log, store, memory,
-                run_dir, rounds, phase, noise_margin, warmup, repeats
+                run_dir, rounds, phase, noise_margin, warmup, repeats, allow_auto_proposal
             )
         status = "completed"
     except Exception as exc:
         status = "failed"
         reason = str(exc)
+        category = (
+            "error_agent_output"
+            if "Coder proposal artifact" in reason or "proposal" in reason.lower()
+            else "error_runtime"
+        )
         decisions = [{
             "iteration": len(log.entries) + 1,
             "verdict": "ERROR",
-            "category": "error_runtime",
+            "category": category,
             "reason": reason,
         }]
         _record_log(
@@ -468,7 +546,7 @@ def run_closed_loop(
             cfg=cfg,
             baseline_version=store.current_best.get(operator_id, ""),
             verdict="ERROR",
-            category="error_runtime",
+            category=category,
             reason=reason,
             correctness=False,
         )
@@ -484,6 +562,17 @@ def run_closed_loop(
         "error": sum(1 for d in decisions if d.get("verdict") == "ERROR"),
         "nochange": sum(1 for d in decisions if d.get("verdict") in {"NOCHANGE", "SKIP"}),
     }
+    if any(d.get("category") == "error_agent_output" for d in decisions):
+        status = "failed"
+    published_best = _publish_latest_keep(
+        operator_id=operator_id,
+        decisions=decisions,
+        store=store,
+        run_dir=run_dir,
+    )
+    if published_best:
+        manifest["published_global_best"] = published_best
+        _append_event(run_dir, "global_best.publish", **published_best)
 
     manifest["status"] = status
     manifest["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -499,6 +588,9 @@ def run_closed_loop(
         f"- run_id: `{run_dir.name}`",
         f"- mode: `{mode}`",
         f"- status: `{status}`",
+        f"- baseline_source: `{baseline_source}`",
+        f"- baseline_path: `{resolved_baseline_path}`",
+        f"- global_best_path: `{published_best.get('source_path') if published_best else global_best_path}`",
         f"- rounds: `{len(decisions)}`",
         f"- keep/reject/error/nochange: `{counts['keep']}/{counts['reject']}/{counts['error']}/{counts['nochange']}`",
         f"- run_dir: `{run_dir}`",
@@ -520,6 +612,9 @@ def run_closed_loop(
         nochange=counts["nochange"],
         logs_dir=str(logs_dir),
         summary_path=str(summary_path),
+        baseline_source=baseline_source,
+        baseline_path=str(resolved_baseline_path),
+        global_best_path=published_best.get("source_path", global_best_path) if published_best else global_best_path,
     )
 
 

@@ -1,7 +1,7 @@
 ---
 description: Reads OperatorSpec, roofline and previous run evidence to propose bounded optimization directions.
 mode: subagent
-model: zhipu/glm-5.2
+model: zhipuai-coding-plan/glm-5.2
 permission:
   bash: allow
   edit: deny

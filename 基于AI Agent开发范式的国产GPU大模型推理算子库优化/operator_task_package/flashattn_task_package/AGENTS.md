@@ -1,146 +1,142 @@
 # AGENTS.md - Operator Optimization Agent Contract
 
-本项目的目标是构建可泛化的算子优化 Agent 系统。Agent 不是只做微调，也不是无约束生成整份 kernel，而是按阶段执行：
+This project builds a generalized multi-agent system for operator optimization.
+The target operator is currently:
+
+- `operator_id`: `flashattention_kvcache_decode`
+- seed kernel: `kernel/splitk_h128.cu`
+- cross-run best index: `results/current_best.json`
+- cross-run best source: `results/best/<operator_id>_best.cu`
+
+Every real optimization run must use this deterministic loop:
 
 ```text
-Explore 大结构候选 -> Stabilize 局部重构 -> Tune 小参数微调
+resolve current best
+-> Analyst report
+-> Coder writes one ChangeProposal artifact
+-> validate proposal artifact
+-> run_closed_loop
+-> compile/correctness/benchmark
+-> A/B decision
+-> KEEP promotes version or rollback
+-> logs and memory
 ```
 
-每个阶段都必须进入确定性闭环：
+## Baseline Rule
+
+Agents must analyze the best available kernel, not blindly restart from the seed
+file.
+
+Use MCP `resolve_best_kernel` with:
+
+```json
+{
+  "operator_id": "flashattention_kvcache_decode",
+  "kernel_path": "kernel/splitk_h128.cu",
+  "baseline_source": "auto"
+}
+```
+
+`baseline_source="auto"` means:
+
+1. Use `results/current_best.json` when a previous real KEEP exists.
+2. Fall back to `kernel/splitk_h128.cu` only when no global best exists.
+
+Use `baseline_source="kernel"` only for an intentional reset experiment.
+
+## Subagent Output Rule
+
+The main agent must never replace a failed subagent.
+
+If Analyst or Coder returns empty:
+
+1. Retry the same subagent once with a shorter prompt.
+2. If it is still empty, stop with `ERROR_AGENT_OUTPUT`.
+3. Do not let the main agent write the Analyst report or Coder proposal.
+
+For Coder, a chat response is not enough. The main agent should first call MCP
+`prepare_proposal_artifact` and pass the returned `proposal_path` to Coder.
+Coder must write that artifact. If the caller gives no path, Coder must call
+`prepare_proposal_artifact` itself and use the returned unique path.
+
+After Coder runs, the main agent must call MCP `validate_change_proposal`.
+If validation fails, retry Coder once with the validation error. If it still
+fails, stop; do not generate a replacement proposal.
+
+## Coder Tiers
 
 ```text
-proposal -> patch/candidate -> compile -> correctness -> benchmark -> A/B decision -> KEEP/rollback -> logs/memory
+Explore   -> scale=macro -> structural candidate
+Stabilize -> scale=meso  -> local rewrite or correctness/perf repair
+Tune      -> scale=micro -> small parameter/launch tweak
 ```
 
-## Coder 分级职责
+Macro candidates are allowed in early exploration, but only as isolated
+candidates. They must not overwrite the current best directly.
 
-### 1. Macro Coder / Architect
+## Required ChangeProposal Fields
 
-用途：前期探索，允许较大结构性变化。
+Coder must output exactly one `ChangeProposal` object per requested round:
 
-适合：
-- 新增 split-k/reduce 结构
-- 切换 kernel 组织方式
-- 引入模板化 mctlass 路径
-- 改变 paged addressing 或 online-softmax 主流程
-
-输出要求：
-- `scale="macro"`
-- `phase="explore"`
-- `change_type` 必须是 `template_swap`、`structural_rewrite`、`memory_layout` 或 `loop_transform`
-- 可以提供完整 `patched_source`，但必须作为候选版本隔离验证
-- 必须写 `rollback_plan`
-- 不允许直接覆盖 current best
-
-### 2. Meso Coder / Stabilizer
-
-用途：中期稳定结构候选。
-
-适合：
-- 修复 macro candidate 的边界、同步、workspace、launch 参数
-- 调整一段循环或 reduce 逻辑
-- 局部访存布局修正
-
-输出要求：
-- `scale="meso"`
-- `phase="stabilize"`
-- 默认净改动上限 40 行
-- 必须有明确 target 和 rollback plan
-
-### 3. Micro Coder / Tuner
-
-用途：后期精调。
-
-适合：
-- `NUM_SPLITS`
-- block size
-- unroll 因子
-- launch/grid 参数
-- 小范围条件判断
-
-输出要求：
-- `scale="micro"`
-- `phase="tune"`
-- 默认净改动上限 6 行
-- `before` 必须在当前源码中唯一匹配
-
-## 核心原则
-
-1. 每轮只验证一个候选，保证因果归因清晰。
-2. 大改可以做，但只能在 Explore/Macro 阶段，以候选版本进入 A/B，不直接污染 best。
-3. 后期才使用 Micro `ChangeProposal` 做小步微调。
-4. Profiler/Judge 必须调用 `scripts/run_closed_loop.py` 或 MCP `run_closed_loop`，不靠聊天结论 KEEP。
-5. KEEP 必须来自真实 A/B：正确性通过，candidate 中位数耗时小于 baseline * `(1 - noise_margin)`。
-6. 所有产物进入 `runs/<run_id>/`，全局索引进入 `results/`。
-7. Logger 不是聊天角色：工具事件写入 `results/opencode_events.jsonl`，优化结论写入 `runs/<run_id>/logs/`。
-
-## 固定目录
-
-```text
-runs/<run_id>/
-  run_manifest.json
-  events.jsonl
-  versions/
-  logs/
-    optimization_log.md
-    optimization_log.jsonl
-    kept_changes.md
-    rejected_changes.md
-    errors.md
-    summary.md
-  memory/
-  rounds/
-    round_001/
-      baseline_a.cu
-      analysis.json
-      proposal.json
-      cand_<proposal>.cu
-      decision.json
-
-results/
-  latest_run.txt
-  summary.md
-  opencode_events.jsonl
+```json
+{
+  "proposal_id": "unique_id",
+  "target": "NUM_SPLITS",
+  "change_type": "param_tune",
+  "scale": "micro",
+  "phase": "tune",
+  "one_line_summary": "Tune split count",
+  "before": "static constexpr int NUM_SPLITS = 12;",
+  "after": "static constexpr int NUM_SPLITS = 8;",
+  "hypothesis": "Reduce reduction overhead",
+  "risk": "low",
+  "validation_scope": "single_case",
+  "rollback_plan": "discard unless compile, correctness, and A/B pass"
+}
 ```
 
-## Agent 分工
+For `macro`, `patched_source` is allowed, but it must still be an isolated
+candidate passed through `run_closed_loop`.
+
+## Agent Roles
 
 Analyst:
-- 读取 OperatorSpec、roofline、latest_run、memory。
-- 判断当前阶段应该 explore、stabilize 还是 tune。
-- 给出 1 到 3 个候选方向，但不写代码。
+- Calls `get_operator_spec`, `resolve_best_kernel`, `roofline_analyze`,
+  `latest_run`, and `query_memory`.
+- Emits a non-empty bottleneck report and 1 to 3 bounded directions.
+- Does not write code.
 
 Coder:
-- 按阶段输出一个 `ChangeProposal`。
-- 前期可以输出 macro candidate，后期输出 micro patch。
-- 不跑 benchmark，不自评 KEEP。
+- Reads the resolved baseline source.
+- Writes one `ChangeProposal` artifact.
+- Does not run benchmark and does not decide KEEP.
 
 Profiler:
-- 执行 `run_closed_loop`。
-- dry-run 验证 patch/候选落盘。
-- real-run 在目标 GPU 上执行 compile/correctness/benchmark。
+- Calls `validate_change_proposal` and `run_closed_loop`.
+- Runs real mode only on the target GPU machine.
+- Reports `run_dir`, `decision.json`, `summary.md`, and best-version metadata.
 
 Judge:
-- 只读 `decision.json`、`optimization_log.jsonl`、`manifest_v2.json`。
-- 裁决 KEEP/REJECT/ERROR/NOCHANGE/SKIP。
+- Reads deterministic artifacts only: `decision.json`, log JSONL, and manifests.
+- Decides from evidence, not from chat claims.
 
 Reflector:
-- ERROR/REJECT 写失败模式。
-- KEEP 写可迁移硬件/算子规律。
+- Records failure patterns and transferable hardware beliefs into run-local
+  memory/logs.
 
-## 当前算子重点
+Logger:
+- Passive event/log role. It does not optimize code.
 
-- operator_id: `flashattention_kvcache_decode`
-- 默认 kernel: `kernel/splitk_h128.cu`
-- dtype: BF16
-- 当前本地默认矩阵: batch `[1,4,16]`, seq_kv `[1024,4096,8192,16384]`, page size 16
-- 关键方向: split-k, paged addressing, online softmax, memory coalescing, mctlass template path
+## KEEP Rule
 
-## 常用命令
+A candidate is promoted only when:
 
-```bash
-python scripts/run_closed_loop.py --phase explore --rounds 1
-python scripts/run_closed_loop.py --phase stabilize --rounds 1
-python scripts/run_closed_loop.py --phase tune --rounds 1
-python scripts/run_closed_loop.py --real --phase tune --rounds 1 --batch 1 --seq-kv 4096 --headdim 128
-```
+1. proposal applies to the current baseline
+2. compile succeeds
+3. correctness passes
+4. benchmark uses median timing
+5. `candidate_ms < baseline_ms * (1 - noise_margin)`
+6. `runs/<run_id>/versions/manifest_v2.json` records the promoted version
+7. `results/current_best.json` is updated with the promoted source
+
+Dry-run `SKIP` is never a performance KEEP.

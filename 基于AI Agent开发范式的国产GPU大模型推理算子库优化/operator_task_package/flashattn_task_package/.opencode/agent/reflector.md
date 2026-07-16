@@ -1,7 +1,7 @@
 ---
 description: Converts deterministic run outcomes into reusable failure cases and hardware beliefs.
 mode: subagent
-model: zhipu/glm-5.2
+model: zhipuai-coding-plan/glm-5.2
 permission:
   bash: allow
   edit: allow

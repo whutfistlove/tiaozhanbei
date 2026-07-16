@@ -1,7 +1,7 @@
 ---
 description: Passive artifact indexer. Use only to explain where logs are stored.
 mode: subagent
-model: zhipu/glm-5.2
+model: zhipuai-coding-plan/glm-5.2
 permission:
   bash: allow
   edit: deny

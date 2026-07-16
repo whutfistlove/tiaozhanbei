@@ -17,6 +17,42 @@
       "rule": "batch=1 时 SM 严重欠载(64 block/96 SM), 应令 num_splits ~= 96/(batch*heads) 以填满 SM; 提高 NUM_SPLITS 上界是低成本单点优化. 手写循环天花板仍在, 后续需 mctlass 才能继续突破",
       "confidence": 0.82,
       "timestamp": "2026-07-16 15:11:06"
+    },
+    {
+      "observation": "flashattention_kvcache_decode, B=4, seq=8192, d=128, paged page_block_size=16, BF16: 将逐 token 的 K/V global 访问重构为按物理 page(16 token) 整块协作加载到 shared memory 再做 QK/PV 内积（loop_transform, macro/explore）。real-run A/B KEEP: baseline 5.6077ms -> candidate 5.1087ms (1.098x, median, noise_margin=0.03), correctness allclose 通过。版本 v0001->v0002 current_best。",
+      "rule": "Paged KV decode 中，按物理 page 整块加载到 shared memory（page-tile）优于逐 token global 访问：block_table 间接寻址次数降 16x、访存粒度从 256B/token 提升到 4KB/page 利于 coalescing/prefetch。该 page-tile shared 布局是后续引入 mctlass MacaMma QK tile 的前置条件。注意：手写标量内积天花板仍在（带宽远低于官方），page-tile 仅缓解访存开销，继续突破需 mctlass TensorCore。",
+      "confidence": 0.55,
+      "timestamp": "2026-07-16 18:26:13"
+    },
+    {
+      "observation": "flashattention_kvcache_decode, B=4, seq=8192, d=128, BF16, v0002(page-tile) baseline: shared K/V layout [PAGE][headdim=128] bf16 = 256B/row 产生 2-way bank conflict；QK 归约每 token 4 次 __syncthreads。meso 候选: PAD=8 bf16 (KSTRIDE=136) 消 bank conflict + 归约 4->3 sync。real-run A/B KEEP: 5.0765ms->4.7096ms (1.078x, median, noise_margin=0.03), correctness pass。累计 v0001->当前 1.19x。",
+      "rule": "MXC500 shared memory: 当 per-row 字节数是 bank-width(128B/32banks×4B) 的整数倍且线程按行连续读 2B 元素时会产生 bank conflict（headdim=128 bf16=256B = 2× bank group → 2-way conflict）。加 PAD=8 bf16 使行stride 错开可消除。QK 树形归约中 active=32 那一层可用 warp shuffle 替代 __syncthreads，每 token 省 1 次屏障。但该类 meso 收益有上限（~8%），带宽仍仅 ~28 GB/s vs 1800 peak，标量 compute 才是天花板，突破必须 mctlass MacaMma TensorCore。置信度 0.6。",
+      "confidence": 0.6,
+      "timestamp": "2026-07-16 18:32:18"
+    },
+    {
+      "observation": "flashattention_kvcache_decode explore_mctlass_qk_builtin_001: 用 __builtin_mxc_mma_16x16x16bf16 把 QK 标量点积换成 tensor core。arch::MacaMma 的 __NATIVE_VECTOR__(2,int32_t) fragment 喂 tensor core 产垃圾值;改成 _Float16 typed __NATIVE_VECTOR__(4,_Float16) 后在独立 harness 下 bit-for-bit 正确。clang wmma header 不在 closed-loop include path,fragment 需手工按 clang lane 布局打包。",
+      "rule": "MXC500 arch::MacaMma fragment 必须 _Float16 typed(__NATIVE_VECTOR__(4,_Float16));int32_t typed fragment 喂 tensor core 产垃圾值。closed-loop 编译环境不含 clang wmma header,fragment 不能用 high-level wmma API,必须手工按 clang lane 布局逐 lane 打包。适用边界: 调用 __builtin_mxc_mma_* 的手写 MMA fragment。",
+      "confidence": 0.7,
+      "timestamp": "2026-07-16 21:23:49"
+    },
+    {
+      "observation": "flashattention_kvcache_decode explore_mctlass_qk_builtin_001: shared memory 用 swizzled 布局后,通过 *(double*) 读取 K 行,在运行时对 K 指针做偏移推进时读到的值损坏(错值);改为每次推进 K 时以固定 base 重建整个 tile 后正确。",
+      "rule": "MXC500 shared memory swizzled 访问不支持运行时指针偏移推进 K/V 行;遍历多行必须以固定 base rebuild tile,不能对 smem 指针做动态 offset。适用边界: swizzled/shared 布局下的 MMA fragment 加载循环。",
+      "confidence": 0.7,
+      "timestamp": "2026-07-16 21:23:49"
+    },
+    {
+      "observation": "flashattention_kvcache_decode explore_mctlass_qk_builtin_001: MacaMma 累加器只在 32-thread(单 warp)block 下正确;block >32 thread 时静默产出恰好 1 个错值。launch_bounds/__launch_bounds__/maxrregcount 均无法修复。最终 QK MMA 必须拆成独立 32-thread kernel。",
+      "rule": "MXC500 MacaMma tensor core 累加器在多 warp(>32 thread)block 下静默出错,launch_bounds/maxrregcount 无效;MMA 计算必须约束在单 warp 32-thread block 内,需要 >32 thread 的逻辑(如 PV)必须拆成独立 kernel。适用边界: 使用 arch::MacaMma 的任何 kernel block 维度选择。",
+      "confidence": 0.75,
+      "timestamp": "2026-07-16 21:23:49"
+    },
+    {
+      "observation": "flashattention_kvcache_decode explore_mctlass_qk_builtin_001: 32-thread MMA kernel grid=2048 时 tensor core 偶发 NaN(79/2048 block 出错 ~3.9%);grid 降到 ≤128(每 block 打包多 page 提升单 block 工作量)后 NaN 消失。",
+      "rule": "MXC500 tensor core 高并发(>256 个 32-thread MMA block)下偶发 NaN,疑似硬件资源/调度竞争;MMA kernel grid 规模应 ≤128 block,通过每 block 打包多 page 提升单 block 工作量来控制并发度。适用边界: 32-thread MMA kernel 的 launch grid 规模上限。",
+      "confidence": 0.7,
+      "timestamp": "2026-07-16 21:23:49"
     }
   ]
 }

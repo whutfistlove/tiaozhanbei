@@ -28,5 +28,15 @@
     "fix": "改为 batch*heads >= 96 ? 1 : min(96/(batch*heads), 12)",
     "code_snippet": "",
     "config": "动态split"
+  },
+  {
+    "case_id": "fail_0004_37029",
+    "timestamp": "2026-07-16 21:23:49",
+    "category": "correctness_error",
+    "symptom": "[proposal_id=explore_mctlass_qk_builtin_001][verdict=REJECT] 用 __builtin_mxc_mma_16x16x16bf16 将 QK 标量点积换成 tensor core 的两段式候选(32-thread qk_score_kernel + 128-thread PV compute kernel) compile OK 且能产出数值,但 closed-loop 标准 correctness FAILED max_abs=0.0851,benchmark 被跳过;同一份 MMA QK 代码在 Coder 独立 harness(单 page/page-packed/≤2048-block grid)下 bit-for-bit 正确。",
+    "root_cause": "独立 harness 与 closed-loop 环境边界差异在标准配置(B=4,seq=8192)下放大: (a) clang wmma header 不在 closed-loop include path,手工打包 fragment 布局在不同上下文偏移;(b) tensor core 高并发(>256 个 32-thread MMA block)偶发 NaN(79/2048 @ grid 2048),closed-loop 标准 grid 触发 harness 小 grid 未覆盖区间;(c) 多 warp block 下 MacaMma 累加器静默产出错值。",
+    "fix": "独立 harness 通过 ≠ closed-loop 通过。MMA 候选进 closed-loop 前必须用 closed-loop 标准 grid/配置复测,harness 必须覆盖 ≥256 并发 block;遵守 4 条 MXC500 MMA 约束: fragment _Float16 typed、单 warp 32-thread block、grid ≤128、K 推进 fixed-base rebuild(详见 domain hardware_belief 2026-07-16 21:23 四条)。",
+    "code_snippet": "",
+    "config": "operator=flashattention_kvcache_decode, B=4, seq=8192, d=128, paged page_block_size=16, BF16, phase=explore, scale=macro"
   }
 ]

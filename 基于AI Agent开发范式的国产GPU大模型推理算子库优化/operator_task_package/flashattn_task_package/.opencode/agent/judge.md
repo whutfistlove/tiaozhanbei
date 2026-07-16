@@ -1,7 +1,7 @@
 ---
 description: Decides KEEP/REJECT/ERROR from deterministic A/B artifacts only.
 mode: subagent
-model: zhipu/glm-5.2
+model: zhipuai-coding-plan/glm-5.2
 permission:
   bash: allow
   edit: deny

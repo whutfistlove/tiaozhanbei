@@ -1,7 +1,7 @@
 ---
 description: Runs deterministic compile/correctness/benchmark/A-B loops and reports artifact locations.
 mode: subagent
-model: zhipu/glm-5.2
+model: zhipuai-coding-plan/glm-5.2
 permission:
   bash: allow
   edit: deny
