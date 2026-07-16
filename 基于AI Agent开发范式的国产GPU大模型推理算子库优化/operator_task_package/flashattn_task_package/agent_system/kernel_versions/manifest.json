@@ -1,0 +1,1 @@
+{ "v0_baseline": {"file":"v0_baseline.cu","desc":"朴素手写baseline","speedup":1.0,"correct":true}, "v1_splitk_h128": {"file":"v1_splitk_h128.cu","desc":"Split-K headdim=128","speedup":0.62,"correct":true,"note":"b=1时最优"} }

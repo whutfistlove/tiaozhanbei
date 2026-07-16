@@ -1,0 +1,129 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "provider": {
+    "zhipu": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Zhipu GLM",
+      "options": {
+        "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+        "apiKey": "{ZHIPU_API_KEY}"
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "GLM-5.2"
+        }
+      }
+    },
+    "moark": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Moark",
+      "options": {
+        "baseURL": "https://api.moark.com/v1"
+      },
+      "models": {
+        "MiniMax-M2.7": {
+          "name": "MiniMax-M2.7"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "flashattn-tools": {
+      "type": "local",
+      "command": [
+        "python",
+        "mcp/mcp_server.py"
+      ],
+      "enabled": true
+    }
+  },
+  "agent": {
+    "analyst": {
+      "description": "Reads OperatorSpec and roofline data, then emits bounded bottleneck reports. Never asks Coder for full-kernel rewrites.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    },
+    "coder": {
+      "description": "Produces one small ChangeProposal JSON per round. It may edit code only through bounded before/after snippets.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "allow",
+        "bash": "ask"
+      }
+    },
+    "profiler": {
+      "description": "Runs deterministic closed-loop scripts or MCP tools for compile, correctness, benchmark and A/B data collection.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    },
+    "judge": {
+      "description": "Accepts only deterministic A/B evidence from run_closed_loop. Decides KEEP/REJECT/ERROR with noise margin.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    },
+    "reflector": {
+      "description": "Summarizes failures and KEEP patterns into run-local memory and reusable skills.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow"
+      }
+    },
+    "logger": {
+      "description": "Passive logger. Tool events go to results/opencode_events.jsonl; A/B logs go to runs/<run_id>/logs/.",
+      "mode": "subagent",
+      "model": "zhipu/glm-5.2",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow"
+      }
+    }
+  },
+  "command": {
+    "closed-loop-dry": {
+      "description": "Fast non-GPU check of the closed-loop pipeline and artifact layout",
+      "template": "Call MCP run_closed_loop with dry_run=true, phase='explore', rounds=1, kernel_path='kernel/splitk_h128.cu'. Then report run_dir, logs, rounds/round_001/proposal.json and decision.json."
+    },
+    "closed-loop-real": {
+      "description": "Run real compile/correctness/benchmark/A-B on the target GPU",
+      "template": "Call MCP run_closed_loop with dry_run=false, rounds=1, kernel_path='kernel/splitk_h128.cu', batch=1, seq_kv=4096, headdim=128. Summarize KEEP/REJECT/ERROR and point to runs/<run_id>/logs/summary.md."
+    },
+    "proposal": {
+      "description": "Generate one tiered ChangeProposal JSON",
+      "template": "As Coder, read AGENTS.md, MCP get_operator_spec and query_memory. First decide phase: explore/macro, stabilize/meso, or tune/micro. Output exactly one ChangeProposal JSON object including proposal_id, target, change_type, scale, phase, one_line_summary, before, after or patched_source, hypothesis, risk, validation_scope, rollback_plan. Macro candidates are allowed early but must be isolated."
+    },
+    "tune-proposal": {
+      "description": "Generate one late-stage micro ChangeProposal JSON",
+      "template": "As Coder, generate exactly one phase='tune', scale='micro' ChangeProposal. before must uniquely match current source, after is a small replacement snippet, changed lines <= 6. Do not output full .cu."
+    },
+    "latest-run": {
+      "description": "Show latest closed-loop run artifacts",
+      "template": "Call MCP latest_run and list_runs. Report manifest, events, logs, rounds and versions paths."
+    },
+    "spec": {
+      "description": "Show current operator specification and optimization space",
+      "template": "Call MCP list_operators and get_operator_spec for flashattention_kvcache_decode. Highlight test matrix, backend constraints and allowed strategy names."
+    },
+    "agent-smoke": {
+      "description": "Run non-GPU generalized multi-agent smoke test",
+      "template": "Call MCP run_agent_smoke and explain whether the generic OperatorSpec loop still works."
+    }
+  }
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "case_id": "fail_0001_39949",
+    "timestamp": "2026-07-15 18:25:49",
+    "category": "api_misuse",
+    "symptom": "illegal memory access: malloc分配partial数组(host内存)被kernel当GPU显存访问",
+    "root_cause": "误用malloc/free替代mcMalloc/mcFree, OpenCode Agent在修复NaN时引入回退",
+    "fix": "改用mcMalloc/mcFree + #include mcr/mc_runtime.h",
+    "code_snippet": "",
+    "config": "headdim=128"
+  },
+  {
+    "case_id": "fail_0002_39949",
+    "timestamp": "2026-07-15 18:25:49",
+    "category": "correctness_error",
+    "symptom": "max_abs=1.0 数值错误(非NaN非越界)",
+    "root_cause": "点积归约后只有tid==0得到score,其它线程score=0导致softmax状态不一致",
+    "fix": "所有线程从shared_s[0]读归约结果,确保score一致",
+    "code_snippet": "",
+    "config": "headdim=128, BLOCK_DIM=128"
+  },
+  {
+    "case_id": "fail_0003_40306",
+    "timestamp": "2026-07-15 18:31:46",
+    "category": "correctness_error",
+    "symptom": "动态split公式 batch*heads*8 多乘8导致batch=1退化split=1",
+    "root_cause": "OpenCode Agent生成公式时误加*8",
+    "fix": "改为 batch*heads >= 96 ? 1 : min(96/(batch*heads), 12)",
+    "code_snippet": "",
+    "config": "动态split"
+  }
+]

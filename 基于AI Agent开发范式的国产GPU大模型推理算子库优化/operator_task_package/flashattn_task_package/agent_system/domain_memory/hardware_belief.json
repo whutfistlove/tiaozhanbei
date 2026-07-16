@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "observation": "headdim=128时朴素手写Split-K正确性通过(6/6配置),但性能仅官方0.28-0.61x",
+      "rule": "朴素手写无TensorCore,无法超越官方flash_attn. 必须用mctlass EpilogueVisitorSoftmax+MacaMma",
+      "confidence": 0.85,
+      "timestamp": "2026-07-15 18:25:49"
+    },
+    {
+      "observation": "朴素手写Split-K在所有配置下带宽仅17-32GB/s(官方200-800), 即使动态split也无法突破",
+      "rule": "手写CUDA循环是性能天花板, Q@K^T和P@V必须用mctlass MacaMma<bf16,16x16x16>替代标量循环",
+      "confidence": 0.9,
+      "timestamp": "2026-07-15 18:31:46"
+    },
+    {
+      "observation": "batch=1,seq=4096,d=128: NUM_SPLITS 8->16 使动态split-k从8升到12(=96 block), 填满~96 SM, A/B加速1.397x(1.1087ms->0.7936ms), KEEP, 正确性通过. roofline suggested_split_k=12 印证",
+      "rule": "batch=1 时 SM 严重欠载(64 block/96 SM), 应令 num_splits ~= 96/(batch*heads) 以填满 SM; 提高 NUM_SPLITS 上界是低成本单点优化. 手写循环天花板仍在, 后续需 mctlass 才能继续突破",
+      "confidence": 0.82,
+      "timestamp": "2026-07-16 15:11:06"
+    }
+  ]
+}
