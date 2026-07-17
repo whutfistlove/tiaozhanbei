@@ -32,7 +32,7 @@ baseline_source=auto
 Resolution order:
 
 1. `results/current_best.json` if a previous real `KEEP` exists.
-2. `results/best/<operator_id>_best.cu` as the actual source snapshot.
+2. `results/<operator_id>/best/<operator_id>_best.cu` as the actual source snapshot.
 3. fallback `kernel/splitk_h128.cu` only when no global best exists.
 
 Use `baseline_source=kernel` only for an intentional reset experiment.  Use
@@ -45,6 +45,35 @@ resolve_best_kernel
 current_best_kernel
 prepare_proposal_artifact
 ```
+
+## Multi-operator Buckets
+
+Registered operators currently include:
+
+- `flashattention_kvcache_decode`: full deterministic real A/B loop.
+- `fused_moe_i8_tn`: registered spec and isolated artifact buckets; real MoE
+  A/B requires a MoE-specific evaluator wired to its benchmark scripts.
+- `dummy_bf16_gemm`: non-GPU framework smoke.
+
+New runs and artifacts are separated by operator:
+
+```text
+runs/<operator_id>/run_YYYYmmdd_HHMMSS_<tag>/
+results/<operator_id>/agent_artifacts/
+results/<operator_id>/baseline/
+results/<operator_id>/best/
+results/<operator_id>/manual_log/
+results/<operator_id>/summary.md
+results/<operator_id>/latest_run.txt
+```
+
+The `baseline/` bucket stores a mirrored seed source and `baseline_source.json`
+so agents can see where a task starts before any real `KEEP` exists.  A task may
+have an empty `best/` directory until a real run promotes a candidate.
+
+When calling MCP tools, pass `operator_id` explicitly for non-FlashAttention
+tasks so MoE proposal artifacts and logs do not land in the FlashAttention
+bucket.
 
 ## Main Entry Points
 
@@ -182,7 +211,7 @@ Macro example:
 ## Agent Roles
 
 - Analyst: bounded bottleneck report from OperatorSpec, roofline and prior runs.
-- Coder: one `ChangeProposal` artifact under `results/agent_artifacts/`.
+- Coder: one `ChangeProposal` artifact under `results/<operator_id>/agent_artifacts/`.
 - Profiler: validates the artifact, then runs `run_closed_loop`.
 - Judge: reads `decision.json` and log JSONL, decides from evidence only.
 - Reflector: writes failure cases and hardware beliefs after the run.

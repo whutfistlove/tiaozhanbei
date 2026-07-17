@@ -64,6 +64,15 @@ def analyze_operator(spec: OperatorSpec) -> AgentRoleReport:
             f"sample roofline: {r.bound_type}, intensity={r.arithmetic_intensity:.3f}, "
             f"suggest_split_k={suggest_split_k(sample)}"
         )
+    elif spec.operator_id == "fused_moe_i8_tn":
+        lines.append(
+            "moe focus: grouped int8 TN GEMM, expert routing locality, "
+            "scale_a/scale_b/moe_weights epilogue fusion"
+        )
+        lines.append(
+            "artifact hint: use metadata benchmark_script/correctness_script until a "
+            "MoE-specific closed-loop evaluator is connected"
+        )
     lines.append("skills=" + ", ".join(spec.skills))
     return AgentRoleReport(role="Analyst", summary="\n".join(lines))
 

@@ -26,6 +26,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--phase", choices=["explore", "stabilize", "tune"], default="tune")
     p.add_argument("--tag", default="closed_loop")
     p.add_argument("--real", action="store_true", help="run real compile/correctness/benchmark")
+    p.add_argument("--baseline-source", choices=["auto", "best", "kernel"], default="auto")
+    p.add_argument(
+        "--proposal-required",
+        action="store_true",
+        help="fail if Coder did not provide enough proposal artifacts",
+    )
+    p.add_argument(
+        "--no-auto-proposal",
+        action="store_true",
+        help="disable built-in smoke proposals; use with --proposal-required for real agent runs",
+    )
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--seq-kv", type=int, default=4096)
     p.add_argument("--headdim", type=int, default=128)
@@ -55,6 +66,9 @@ def main() -> int:
         noise_margin=args.noise_margin,
         warmup=args.warmup,
         repeats=args.repeats,
+        baseline_source=args.baseline_source,
+        proposal_required=args.proposal_required,
+        allow_auto_proposal=not args.no_auto_proposal,
     )
     print(result_to_json(result))
     print(f"\nrun_dir: {result.run_dir}")

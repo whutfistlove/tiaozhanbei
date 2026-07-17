@@ -19,6 +19,26 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("MACA_PATH", "/opt/maca")
 
+DEFAULT_OPERATOR_ID = "flashattention_kvcache_decode"
+DEFAULT_KERNEL = ROOT / "kernel" / "splitk_h128.cu"
+
+
+def _operator_kernel_path(operator_id: str, kernel_path: str) -> str:
+    """Use the registered operator starter when the caller left kernel_path default."""
+    requested = Path(kernel_path)
+    resolved = requested if requested.is_absolute() else ROOT / requested
+    if operator_id == DEFAULT_OPERATOR_ID or resolved != DEFAULT_KERNEL:
+        return str(kernel_path)
+    try:
+        from agent_system.operator_registry import get_operator
+
+        starter = get_operator(operator_id).metadata.get("starter_cuda_maca")
+    except Exception:
+        starter = None
+    if starter:
+        return str((ROOT / starter).resolve())
+    return str(kernel_path)
+
 
 def tool_compile_kernel(source_path: str, output_so: str = "") -> dict:
     """Compile a .cu source file into a shared object."""
@@ -430,19 +450,23 @@ def tool_current_best_kernel(operator_id: str = "flashattention_kvcache_decode")
     }
 
 
-def tool_prepare_proposal_artifact(tag: str = "coder") -> dict:
+def tool_prepare_proposal_artifact(
+    tag: str = "coder",
+    operator_id: str = "flashattention_kvcache_decode",
+) -> dict:
     """Create a unique proposal-artifact path for one Coder attempt."""
-    from agent_system.paths import RESULTS_DIR, ensure_output_roots
+    from agent_system.paths import ensure_output_roots, operator_results_dir
 
-    ensure_output_roots()
+    ensure_output_roots(operator_id)
     safe_tag = "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)[:32] or "coder"
     stamp = time.strftime("%Y%m%d_%H%M%S")
     millis = int((time.time() % 1) * 1000)
-    artifact_dir = RESULTS_DIR / "agent_artifacts"
+    artifact_dir = operator_results_dir(operator_id) / "agent_artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{stamp}_{millis:03d}_{safe_tag}"
     return {
         "success": True,
+        "operator_id": operator_id,
         "artifact_dir": str(artifact_dir),
         "proposal_path": str(artifact_dir / f"{stem}_proposal.json"),
         "error_path": str(artifact_dir / f"{stem}_coder_error.json"),
@@ -457,9 +481,10 @@ def tool_resolve_best_kernel(
     """Resolve the baseline source path that the next run will analyze."""
     from agent_system.global_best import resolve_baseline_source
 
+    resolved_kernel_path = _operator_kernel_path(operator_id, kernel_path)
     source, path, meta = resolve_baseline_source(
         operator_id=operator_id,
-        kernel_path=kernel_path,
+        kernel_path=resolved_kernel_path,
         baseline_source=baseline_source,
     )
     return {
@@ -490,9 +515,10 @@ def tool_validate_change_proposal(
     if not path.exists():
         return {"success": False, "valid": False, "reason": f"proposal artifact not found: {path}"}
 
+    resolved_kernel_path = _operator_kernel_path(operator_id, kernel_path)
     source, baseline_path, meta = resolve_baseline_source(
         operator_id=operator_id,
-        kernel_path=kernel_path,
+        kernel_path=resolved_kernel_path,
         baseline_source=baseline_source,
     )
     try:
@@ -596,23 +622,31 @@ def tool_run_closed_loop(
     return data
 
 
-def tool_list_runs(limit: int = 10) -> dict:
+def tool_list_runs(
+    limit: int = 10,
+    operator_id: str = "",
+) -> dict:
     """List recent closed-loop run directories."""
     from agent_system.paths import list_run_dirs
 
-    runs = list_run_dirs(limit=limit)
-    return {"success": True, "runs": [{"run_id": p.name, "run_dir": str(p)} for p in runs]}
+    runs = list_run_dirs(limit=limit, operator_id=operator_id)
+    return {
+        "success": True,
+        "operator_id": operator_id,
+        "runs": [{"run_id": p.name, "run_dir": str(p)} for p in runs],
+    }
 
 
-def tool_latest_run() -> dict:
+def tool_latest_run(operator_id: str = "") -> dict:
     """Return the latest run and key artifact locations."""
     from agent_system.paths import latest_run_dir
 
-    run = latest_run_dir()
+    run = latest_run_dir(operator_id=operator_id)
     if run is None:
-        return {"success": True, "run": None}
+        return {"success": True, "operator_id": operator_id, "run": None}
     return {
         "success": True,
+        "operator_id": operator_id,
         "run": {
             "run_id": run.name,
             "run_dir": str(run),
@@ -762,7 +796,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "prepare_proposal_artifact",
         "description": "Allocate a unique file path for the next Coder proposal",
-        "inputSchema": {"type": "object", "properties": {"tag": {"type": "string"}}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string"},
+                "operator_id": {"type": "string"},
+            },
+        },
     },
     {
         "name": "resolve_best_kernel",
@@ -817,9 +857,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "list_runs",
         "description": "List recent closed-loop runs",
-        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer"},
+                "operator_id": {"type": "string"},
+            },
+        },
     },
-    {"name": "latest_run", "description": "Show latest closed-loop run", "inputSchema": {"type": "object", "properties": {}}},
+    {
+        "name": "latest_run",
+        "description": "Show latest closed-loop run",
+        "inputSchema": {"type": "object", "properties": {"operator_id": {"type": "string"}}},
+    },
 ]
 
 

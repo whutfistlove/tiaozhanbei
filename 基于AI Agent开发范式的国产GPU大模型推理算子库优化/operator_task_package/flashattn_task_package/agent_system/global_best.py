@@ -12,24 +12,23 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-from agent_system.paths import PROJECT_ROOT, RESULTS_DIR, ensure_output_roots
+from agent_system.paths import PROJECT_ROOT, RESULTS_DIR, ensure_output_roots, operator_results_dir, safe_operator_id
 
 
 BaselineSource = Literal["auto", "best", "kernel"]
 
-BEST_DIR = RESULTS_DIR / "best"
 CURRENT_BEST_INDEX = RESULTS_DIR / "current_best.json"
 
 
 def _safe_operator_id(operator_id: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in operator_id)[:96]
+    return safe_operator_id(operator_id)
 
 
 def _load_index() -> dict[str, Any]:
     if not CURRENT_BEST_INDEX.exists():
         return {"operators": {}}
     try:
-        data = json.loads(CURRENT_BEST_INDEX.read_text(encoding="utf-8"))
+        data = json.loads(CURRENT_BEST_INDEX.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError:
         return {"operators": {}}
     if not isinstance(data, dict):
@@ -47,7 +46,11 @@ def _save_index(data: dict[str, Any]) -> None:
 
 
 def best_source_path(operator_id: str) -> Path:
-    return BEST_DIR / f"{_safe_operator_id(operator_id)}_best.cu"
+    return operator_results_dir(operator_id) / "best" / f"{_safe_operator_id(operator_id)}_best.cu"
+
+
+def legacy_best_source_path(operator_id: str) -> Path:
+    return RESULTS_DIR / "best" / f"{_safe_operator_id(operator_id)}_best.cu"
 
 
 def get_global_best(operator_id: str) -> dict[str, Any] | None:
@@ -59,7 +62,12 @@ def get_global_best(operator_id: str) -> dict[str, Any] | None:
     if not source_path.is_absolute():
         source_path = PROJECT_ROOT / source_path
     if not source_path.exists():
-        return None
+        for candidate in (best_source_path(operator_id), legacy_best_source_path(operator_id)):
+            if candidate.exists():
+                source_path = candidate
+                break
+        else:
+            return None
     entry = dict(entry)
     entry["source_path"] = str(source_path)
     return entry
@@ -76,9 +84,9 @@ def publish_global_best(
     description: str = "",
 ) -> dict[str, Any]:
     """Persist a KEEP-promoted source as the cross-run current best."""
-    ensure_output_roots()
-    BEST_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_output_roots(operator_id)
     dst = best_source_path(operator_id)
+    dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(source_code, encoding="utf-8")
 
     entry = {

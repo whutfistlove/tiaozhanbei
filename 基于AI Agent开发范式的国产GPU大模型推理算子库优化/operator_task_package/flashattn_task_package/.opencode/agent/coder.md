@@ -24,7 +24,7 @@ path, call MCP `prepare_proposal_artifact` and use the returned `proposal_path`.
 Then return only:
 
 ```text
-CODER_ARTIFACT: results/agent_artifacts/latest_coder_proposal.json
+CODER_ARTIFACT: <proposal_path>
 PROPOSAL_ID: <proposal_id>
 STATUS: OK
 ```

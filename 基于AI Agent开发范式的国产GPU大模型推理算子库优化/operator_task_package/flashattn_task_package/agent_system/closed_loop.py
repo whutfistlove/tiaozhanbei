@@ -23,10 +23,9 @@ from agent_system.global_best import (
 )
 from agent_system.kernel_version_store import KernelVersionStore
 from agent_system.optimization_log import OptimizationEntry, OptimizationLog
+from agent_system.operator_registry import get_operator
 from agent_system.paths import (
     PROJECT_ROOT,
-    RUNS_DIR,
-    RESULTS_DIR,
     list_run_dirs,
     new_run_dir,
     update_results_summary,
@@ -448,13 +447,21 @@ def run_closed_loop(
     proposal_required: bool = False,
     allow_auto_proposal: bool = True,
 ) -> ClosedLoopResult:
+    spec = get_operator(operator_id)
+    requested_kernel = Path(kernel_path)
+    resolved_requested_kernel = requested_kernel if requested_kernel.is_absolute() else PROJECT_ROOT / requested_kernel
+    if operator_id != DEFAULT_OPERATOR_ID and resolved_requested_kernel == DEFAULT_KERNEL:
+        starter = spec.metadata.get("starter_cuda_maca")
+        if starter:
+            kernel_path = (PROJECT_ROOT / starter).resolve()
+
     initial_code, resolved_baseline_path, baseline_meta = resolve_baseline_source(
         operator_id=operator_id,
         kernel_path=kernel_path,
         baseline_source=baseline_source,
     )
 
-    run_dir = new_run_dir(tag)
+    run_dir = new_run_dir(tag, operator_id=operator_id)
     logs_dir = run_dir / "logs"
     cfg = KernelConfig(
         batch_size=batch,
@@ -493,7 +500,7 @@ def run_closed_loop(
         },
     }
     _write_json(run_dir / "run_manifest.json", manifest)
-    write_latest_run(run_dir)
+    write_latest_run(run_dir, operator_id=operator_id)
     _append_event(
         run_dir,
         "run.start",
@@ -509,6 +516,16 @@ def run_closed_loop(
     store = KernelVersionStore(run_dir / "versions")
 
     try:
+        if (
+            not dry_run
+            and operator_id != DEFAULT_OPERATOR_ID
+            and spec.metadata.get("requires_operator_specific_evaluator")
+        ):
+            raise RuntimeError(
+                f"real closed_loop for {operator_id} requires an operator-specific "
+                "compile/correctness/benchmark evaluator; use the task benchmark "
+                "scripts or connect a MoE evaluator before real A/B"
+            )
         proposals = load_proposals(proposal_path)
         if dry_run:
             decisions = _run_dry_loop(
@@ -554,7 +571,7 @@ def run_closed_loop(
         _append_event(run_dir, "run.error", error=reason)
     finally:
         # Always refresh latest_run so failed runs remain inspectable.
-        write_latest_run(run_dir)
+        write_latest_run(run_dir, operator_id=operator_id)
 
     counts = {
         "keep": sum(1 for d in decisions if d.get("verdict") == "KEEP"),
@@ -585,6 +602,7 @@ def run_closed_loop(
     update_results_summary([
         "# Latest Closed Loop Run",
         "",
+        f"- operator_id: `{operator_id}`",
         f"- run_id: `{run_dir.name}`",
         f"- mode: `{mode}`",
         f"- status: `{status}`",
@@ -597,8 +615,8 @@ def run_closed_loop(
         f"- logs: `{logs_dir}`",
         "",
         "Recent runs:",
-        *[f"- `{p.name}`" for p in list_run_dirs(limit=5)],
-    ])
+        *[f"- `{p.name}`" for p in list_run_dirs(limit=5, operator_id=operator_id)],
+    ], operator_id=operator_id)
 
     return ClosedLoopResult(
         run_id=run_dir.name,

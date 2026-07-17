@@ -16,6 +16,7 @@ from agent_system.specs import (
     OperatorSpec,
     OptimizationParam,
     OptimizationSpace,
+    TestCaseSpec,
     TensorSpec,
     make_case_grid,
 )
@@ -53,6 +54,7 @@ def ensure_default_operators() -> None:
     if _REGISTRY:
         return
     register_operator(_flashattention_kvcache_decode_spec())
+    register_operator(_fused_moe_i8_tn_spec())
     register_operator(_dummy_gemm_spec())
 
 
@@ -141,6 +143,136 @@ def _flashattention_kvcache_decode_spec() -> OperatorSpec:
             "page_block_size": 16,
             "causal": 0,
             "dtype_bytes": 2,
+        },
+    )
+
+
+def _fused_moe_i8_tn_spec() -> OperatorSpec:
+    cases = (
+        TestCaseSpec(
+            "moe_i8_tn_public_001",
+            {"em": 4096, "n": 4096, "k": 7168, "topk": "dynamic"},
+            tags=("oj_matrix", "w8a8", "small_em"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_public_002",
+            {"em": 32768, "n": 4096, "k": 7168, "topk": "dynamic"},
+            tags=("oj_matrix", "w8a8", "large_em"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_public_003",
+            {"em": 4096, "n": 7168, "k": 2048, "topk": "dynamic"},
+            tags=("oj_matrix", "w8a8", "wide_n"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_public_004",
+            {"em": 32768, "n": 7168, "k": 2048, "topk": "dynamic"},
+            tags=("oj_matrix", "w8a8", "large_em", "wide_n"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_benchmark_topk1",
+            {"rows": 256, "n": 128, "k": 128, "topk": 1},
+            tags=("local_benchmark", "smoke"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_benchmark_topk2",
+            {"rows": 256, "n": 128, "k": 128, "topk": 2},
+            tags=("local_benchmark", "smoke"),
+        ),
+        TestCaseSpec(
+            "moe_i8_tn_benchmark_topk3",
+            {"rows": 128, "n": 128, "k": 128, "topk": 3},
+            tags=("local_benchmark", "smoke"),
+        ),
+    )
+    backend = BackendSpec(
+        kind="maca_cpp",
+        language="CUDA Maca C++",
+        compile_command=(
+            "bash operator_task_package/fused_moe_task_package/benchmark/scripts/"
+            "build_fused_moe_i8_tn_pybind.sh"
+        ),
+        runtime="pybind benchmark + XPU-OJ run_kernel submission",
+        include_paths=(
+            "$MACA_PATH/include",
+            "../fused_moe_task_package/benchmark/standalone/fused_moe_i8_tn/src",
+        ),
+        constraints=(
+            "extern C run_kernel signature must match XPU-OJ Fused MoE",
+            "W8A8 int8 inputs with fp32 scale_a/scale_b and bf16 output",
+            "do not rely on benchmark-only pybind symbols in OJ submission",
+        ),
+    )
+    eval_spec = EvaluationSpec(
+        accuracy=AccuracySpec(method="torch/reference allclose", rtol=1e-2, atol=1e-2),
+        primary_metric="time_ms",
+        higher_is_better=False,
+        warmup=5,
+        repeats=20,
+    )
+    opt_space = OptimizationSpace(
+        params=(
+            OptimizationParam("block_m", (16, 32, 64, 128), 32,
+                              "Rows of routed tokens per CTA", "medium"),
+            OptimizationParam("block_n", (32, 64, 128), 64,
+                              "Output columns per CTA", "medium"),
+            OptimizationParam("block_k", (64, 128, 256), 128,
+                              "K tile for int8 GEMM mainloop", "medium"),
+            OptimizationParam("threads", (128, 256), 256,
+                              "Threads per CTA", "medium"),
+            OptimizationParam("use_mctlass", (True, False), True,
+                              "Use mctlass/int8 GEMM primitives when available", "high"),
+            OptimizationParam("fuse_epilogue_scale", (True, False), True,
+                              "Fuse scale_a/scale_b/moe_weights into epilogue", "low"),
+        ),
+        strategy_names=(
+            "grouped_gemm_by_expert",
+            "int8_mma_tile",
+            "expert_routing_reorder",
+            "scale_epilogue_fusion",
+            "persistent_expert_blocks",
+            "pybind_benchmark_adapter",
+        ),
+    )
+    return OperatorSpec(
+        operator_id="fused_moe_i8_tn",
+        display_name="Fused MoE W8A8 TN",
+        category="moe.grouped_gemm.w8a8",
+        interface=(
+            "extern \"C\" void run_kernel(a, b_col_major, scale_a, scale_b, "
+            "moe_weights, token_ids, expert_ids, topk, out)"
+        ),
+        inputs=(
+            TensorSpec("a", "(EM, K)", "int8", description="routed token activations"),
+            TensorSpec("b_col_major", "(E, N, K)", "int8", layout="expert-major TN"),
+            TensorSpec("scale_a", "(EM,)", "float32"),
+            TensorSpec("scale_b", "(E, N)", "float32"),
+            TensorSpec("moe_weights", "(EM,)", "float32", description="routing weights per routed row"),
+            TensorSpec("token_ids", "(EM,)", "int32"),
+            TensorSpec("expert_ids", "(ceil(EM/tile),)", "int32"),
+            TensorSpec("topk", "scalar", "int64"),
+        ),
+        outputs=(TensorSpec("out", "(EM, N)", "bf16", role="output"),),
+        test_cases=cases,
+        backend=backend,
+        evaluation=eval_spec,
+        optimization_space=opt_space,
+        skills=(
+            "mctlass-usage",
+            "roofline-spec",
+            "run-benchmark",
+        ),
+        expected_bound="compute-bound",
+        metadata={
+            "task_package": "../fused_moe_task_package",
+            "benchmark_dir": "../fused_moe_task_package/benchmark",
+            "baseline_kernel": "../fused_moe_task_package/kernel/baseline_kernel.cu",
+            "starter_cuda_maca": "../fused_moe_task_package/kernel/baseline_kernel.cu",
+            "starter_cuda_maca_original": "../fused_moe_task_package/starter/示例冒烟代码-CUDA Maca.txt",
+            "benchmark_script": "scripts/run_fused_moe_i8_tn_benchmark.sh",
+            "correctness_script": "scripts/run_fused_moe_i8_tn_pybind_test.sh",
+            "dtype": "W8A8",
+            "requires_operator_specific_evaluator": True,
         },
     )
 

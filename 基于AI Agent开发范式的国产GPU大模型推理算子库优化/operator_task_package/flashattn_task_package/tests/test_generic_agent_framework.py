@@ -14,9 +14,10 @@ from agent_system.optimization_log import OptimizationLog
 from agent_system.strategy_schema import OptimizationStrategy, validate_strategy
 
 
-def test_registry_has_flashattention_and_dummy():
+def test_registry_has_flashattention_moe_and_dummy():
     ids = {spec.operator_id for spec in list_operators()}
     assert "flashattention_kvcache_decode" in ids
+    assert "fused_moe_i8_tn" in ids
     assert "dummy_bf16_gemm" in ids
 
 
@@ -25,6 +26,14 @@ def test_flashattention_spec_is_not_empty():
     assert len(spec.test_cases) == 12
     assert spec.backend.kind == "maca_cpp"
     assert "split-k-pattern" in spec.skills
+
+
+def test_fused_moe_spec_is_registered():
+    spec = get_operator("fused_moe_i8_tn")
+    assert len(spec.test_cases) >= 4
+    assert spec.backend.kind == "maca_cpp"
+    assert "run_kernel" in spec.interface
+    assert spec.metadata["requires_operator_specific_evaluator"] is True
 
 
 def test_analyze_operator_generic():

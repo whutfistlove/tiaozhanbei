@@ -1,12 +1,24 @@
 # AGENTS.md - Operator Optimization Agent Contract
 
 This project builds a generalized multi-agent system for operator optimization.
-The target operator is currently:
+Registered operators currently include:
 
-- `operator_id`: `flashattention_kvcache_decode`
-- seed kernel: `kernel/splitk_h128.cu`
-- cross-run best index: `results/current_best.json`
-- cross-run best source: `results/best/<operator_id>_best.cu`
+- `flashattention_kvcache_decode`: full real A/B loop, seed `kernel/splitk_h128.cu`
+- `fused_moe_i8_tn`: registered MoE W8A8 spec and isolated artifact buckets
+- `dummy_bf16_gemm`: non-GPU generalization smoke
+
+Cross-run best index remains global: `results/current_best.json`.
+Per-operator artifacts are bucketed under:
+
+```text
+runs/<operator_id>/
+results/<operator_id>/
+```
+
+For FlashAttention, the current best source is now written to
+`results/flashattention_kvcache_decode/best/flashattention_kvcache_decode_best.cu`.
+Legacy best paths referenced in `current_best.json` remain readable if the file
+still exists.
 
 Every real optimization run must use this deterministic loop:
 
